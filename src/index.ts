@@ -3,13 +3,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { IsomorphicHeaders } from "@modelcontextprotocol/sdk/types.js";
-import express, { Request, Response } from "express";
+import express, { Request, Response, Express } from "express";
 import { z } from "zod";
 import { randomBytes } from "crypto";
 import { parseArgs as utilParseArgs } from "node:util";
+import { Server } from "http";
 
 // Configuration interface
-interface Config {
+export interface Config {
   secret: string;
   allowedUrlRegex: RegExp;
   allowedMethods: Set<string>;
@@ -101,7 +102,7 @@ function logRequest(
 }
 
 // Validate URL and HTTP method against security constraints
-function validateRequest(
+export function validateRequest(
   url: string,
   method: string,
   config: Config
@@ -153,7 +154,7 @@ function validateRequest(
 }
 
 // Merge and filter headers from both tool headers and passthrough headers from MCP request
-function mergeAndFilterHeaders(
+export function mergeAndFilterHeaders(
   toolHeaders: Record<string, string> | undefined,
   passthroughHeaders: IsomorphicHeaders | undefined,
   config: Config
@@ -186,7 +187,7 @@ function mergeAndFilterHeaders(
 }
 
 // Perform HTTP fetch operation
-async function performFetch(
+export async function performFetch(
   url: string,
   method: string,
   headers: Record<string, string>,
@@ -345,75 +346,102 @@ async function performFetch(
   }
 }
 
-// Create MCP server
-const server = new McpServer({
-  name: "fetch-mcp",
-  version: "1.0.0",
-});
+// Create and configure the MCP server and Express app
+export async function createServer(config: Config): Promise<{
+  app: Express;
+  server: McpServer;
+  transport: StreamableHTTPServerTransport;
+  httpServer?: Server;
+}> {
+  // Create MCP server
+  const server = new McpServer({
+    name: "fetch-mcp",
+    version: "1.0.0",
+  });
 
-// Register web_fetch tool
-server.tool(
-  "web_fetch",
-  "Fetch a URL over HTTP with configurable security constraints",
-  {
-    url: z.string().url().describe("The URL to fetch"),
-    method: z.string().optional().describe("HTTP method (GET, POST, etc.)"),
-    headers: z.record(z.string()).optional().describe("HTTP headers to include"),
-    body: z.string().optional().describe("Request body for POST/PUT requests"),
-  },
-  async ({ url, method = "GET", headers, body }, extra) => {
-    // Validate URL and HTTP method
-    const validationError = validateRequest(url, method, config);
-    if (validationError) {
-      return validationError;
+  // Register web_fetch tool
+  server.tool(
+    "web_fetch",
+    "Fetch a URL over HTTP with configurable security constraints",
+    {
+      url: z.string().url().describe("The URL to fetch"),
+      method: z.string().optional().describe("HTTP method (GET, POST, etc.)"),
+      headers: z.record(z.string()).optional().describe("HTTP headers to include"),
+      body: z.string().optional().describe("Request body for POST/PUT requests"),
+    },
+    async ({ url, method = "GET", headers, body }, extra) => {
+      // Validate URL and HTTP method
+      const validationError = validateRequest(url, method, config);
+      if (validationError) {
+        return validationError;
+      }
+
+      // Merge and filter headers from both tool params and MCP request
+      const filteredHeaders = mergeAndFilterHeaders(headers, extra.requestInfo?.headers, config);
+
+      // Perform fetch with filtered headers
+      return await performFetch(url, method, filteredHeaders, body, config);
+    }
+  );
+
+  // Create Express app
+  const app = express();
+  app.use(express.json());
+
+  // Secret validation middleware
+  app.use((req: Request, res: Response, next) => {
+    const providedSecret = req.headers["x-webfetchmcp-secret"];
+
+    if (providedSecret !== config.secret) {
+      res.status(401).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32000,
+          message: "Authentication failed: Invalid or missing X-WebFetchMcp-Secret header"
+        },
+        id: null
+      });
+      return;
     }
 
-    // Merge and filter headers from both tool params and MCP request
-    const filteredHeaders = mergeAndFilterHeaders(headers, extra.requestInfo?.headers, config);
+    next();
+  });
 
-    // Perform fetch with filtered headers
-    return await performFetch(url, method, filteredHeaders, body, config);
-  }
-);
+  // Create transport
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined, // Stateless server
+  });
 
-// Create Express app
-const app = express();
-app.use(express.json());
+  // Connect server to transport
+  await server.connect(transport);
 
-// Secret validation middleware
-app.use((req: Request, res: Response, next) => {
-  const providedSecret = req.headers["x-webfetchmcp-secret"];
+  // Handle MCP requests
+  app.post("/mcp", async (req: Request, res: Response) => {
+    await transport.handleRequest(req, res, req.body);
+  });
 
-  if (providedSecret !== config.secret) {
-    res.status(401).json({
-      jsonrpc: "2.0",
-      error: {
-        code: -32000,
-        message: "Authentication failed: Invalid or missing X-WebFetchMcp-Secret header"
-      },
-      id: null
-    });
-    return;
-  }
+  return { app, server, transport };
+}
 
-  next();
-});
+// Main execution (only runs when file is executed directly)
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const config = parseArgs();
 
-// Create transport
-const transport = new StreamableHTTPServerTransport({
-  sessionIdGenerator: undefined, // Stateless server
-});
+  // Log the secret to stderr for client configuration
+  console.error(`[fetch-mcp] Server starting...`);
+  console.error(`[fetch-mcp] Secret: ${config.secret}`);
+  console.error(`[fetch-mcp] Allowed URL regex: ${config.allowedUrlRegex.source}`);
+  console.error(`[fetch-mcp] Allowed methods: ${Array.from(config.allowedMethods).join(", ")}`);
+  console.error(`[fetch-mcp] Allowed tool headers: ${Array.from(config.allowedToolHeaderNames).join(", ")}`);
+  console.error(`[fetch-mcp] Allowed passthrough headers: ${Array.from(config.allowedPassthroughHeaderNames).join(", ") || "(none)"}`);
+  console.error(`[fetch-mcp] Fetch timeout: ${config.fetchTimeout}s`);
+  console.error(`[fetch-mcp] Max response size: ${config.fetchMaxResponseSize}KB`);
 
-// Connect server to transport
-await server.connect(transport);
+  const { app } = await createServer(config);
 
-// Handle MCP requests
-app.post("/mcp", async (req: Request, res: Response) => {
-  await transport.handleRequest(req, res, req.body);
-});
-
-// Start server
-app.listen(config.port, () => {
-  console.error(`[fetch-mcp] Server listening on port ${config.port}`);
-  console.error(`[fetch-mcp] MCP endpoint: http://localhost:${config.port}/mcp`);
-});
+  // Start server
+  app.listen(config.port, () => {
+    console.error(`[fetch-mcp] Server listening on port ${config.port}`);
+    console.error(`[fetch-mcp] MCP endpoint: http://localhost:${config.port}/mcp`);
+  });
+}
