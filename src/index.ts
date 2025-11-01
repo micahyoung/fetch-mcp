@@ -2,6 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { IsomorphicHeaders } from "@modelcontextprotocol/sdk/types.js";
 import express, { Request, Response } from "express";
 import { z } from "zod";
 import { randomBytes } from "crypto";
@@ -11,7 +12,8 @@ interface Config {
   secret: string;
   allowedUrlRegex: RegExp;
   allowedMethods: Set<string>;
-  allowedHeaderNames: Set<string>;
+  allowedToolHeaderNames: Set<string>;
+  allowedPassthroughHeaderNames: Set<string>;
   fetchTimeout: number;
   fetchMaxResponseSize: number;
   port: number;
@@ -24,7 +26,8 @@ function parseArgs(): Config {
     secret: randomBytes(32).toString("hex"),
     allowedUrlRegex: /^http:\/\/localhost(:[0-9]+)?(\/.*)?$/,
     allowedMethods: new Set(["GET"]),
-    allowedHeaderNames: new Set(["authorization", "content-type", "accept", "user-agent"]),
+    allowedToolHeaderNames: new Set(["content-type", "accept"]),
+    allowedPassthroughHeaderNames: new Set([]),
     fetchTimeout: 30,
     fetchMaxResponseSize: 100,
     port: 3000,
@@ -38,9 +41,12 @@ function parseArgs(): Config {
     } else if (arg.startsWith("--allowed-methods=")) {
       const methods = arg.slice(18).split(",").map(m => m.trim().toUpperCase());
       config.allowedMethods = new Set(methods);
-    } else if (arg.startsWith("--allowed-header-names=")) {
-      const headers = arg.slice(23).split(",").map(h => h.trim().toLowerCase());
-      config.allowedHeaderNames = new Set(headers);
+    } else if (arg.startsWith("--allowed-tool-header-names=")) {
+      const headers = arg.slice(29).split(",").map(h => h.trim().toLowerCase());
+      config.allowedToolHeaderNames = new Set(headers);
+    } else if (arg.startsWith("--allowed-passthrough-header-names=")) {
+      const headers = arg.slice(27).split(",").map(h => h.trim().toLowerCase());
+      config.allowedPassthroughHeaderNames = new Set(headers);
     } else if (arg.startsWith("--fetch-timeout=")) {
       config.fetchTimeout = parseInt(arg.slice(16), 10);
     } else if (arg.startsWith("--fetch-max-response-size=")) {
@@ -61,7 +67,8 @@ console.error(`[fetch-mcp] Server starting...`);
 console.error(`[fetch-mcp] Secret: ${config.secret}`);
 console.error(`[fetch-mcp] Allowed URL regex: ${config.allowedUrlRegex.source}`);
 console.error(`[fetch-mcp] Allowed methods: ${Array.from(config.allowedMethods).join(", ")}`);
-console.error(`[fetch-mcp] Allowed headers: ${Array.from(config.allowedHeaderNames).join(", ")}`);
+console.error(`[fetch-mcp] Allowed tool headers: ${Array.from(config.allowedToolHeaderNames).join(", ")}`);
+console.error(`[fetch-mcp] Allowed passthrough headers: ${Array.from(config.allowedPassthroughHeaderNames).join(", ") || "(none)"}`);
 console.error(`[fetch-mcp] Fetch timeout: ${config.fetchTimeout}s`);
 console.error(`[fetch-mcp] Max response size: ${config.fetchMaxResponseSize}KB`);
 
@@ -84,11 +91,96 @@ function logRequest(
   );
 }
 
-// Validate and fetch URL
+// Validate URL and HTTP method against security constraints
+function validateRequest(
+  url: string,
+  method: string,
+  config: Config
+): {
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent: { url: string; retrievedAt: string; statusCode: number };
+  isError: true;
+} | null {
+  const retrievedAt = new Date().toISOString();
+
+  // Validate URL
+  if (!config.allowedUrlRegex.test(url)) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `URL not allowed: ${url} does not match allowed regex ${config.allowedUrlRegex.source}`,
+        },
+      ],
+      structuredContent: {
+        url,
+        retrievedAt,
+        statusCode: -1,
+      },
+      isError: true,
+    };
+  }
+
+  // Validate method
+  const upperMethod = method.toUpperCase();
+  if (!config.allowedMethods.has(upperMethod)) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Method not allowed: ${method}. Allowed methods: ${Array.from(config.allowedMethods).join(", ")}`,
+        },
+      ],
+      structuredContent: {
+        url,
+        retrievedAt,
+        statusCode: -1,
+      },
+      isError: true,
+    };
+  }
+
+  return null; // Validation passed
+}
+
+// Merge and filter headers from both tool headers and passthrough headers from MCP request
+function mergeAndFilterHeaders(
+  toolHeaders: Record<string, string> | undefined,
+  passthroughHeaders: IsomorphicHeaders | undefined,
+  config: Config
+): Record<string, string> {
+  const filteredHeaders: Record<string, string> = {};
+
+  // First, add filtered passthrough headers from MCP request
+  if (passthroughHeaders) {
+    for (const [key, value] of Object.entries(passthroughHeaders)) {
+      if (config.allowedPassthroughHeaderNames.has(key.toLowerCase())) {
+        // Convert array values to comma-separated string
+        const stringValue = Array.isArray(value) ? value.join(", ") : value;
+        if (stringValue !== undefined) {
+          filteredHeaders[key] = stringValue;
+        }
+      }
+    }
+  }
+
+  // Then, add filtered tool headers (these take precedence)
+  if (toolHeaders) {
+    for (const [key, value] of Object.entries(toolHeaders)) {
+      if (config.allowedToolHeaderNames.has(key.toLowerCase())) {
+        filteredHeaders[key] = value;
+      }
+    }
+  }
+
+  return filteredHeaders;
+}
+
+// Perform HTTP fetch operation
 async function performFetch(
   url: string,
   method: string,
-  headers: Record<string, string> | undefined,
+  headers: Record<string, string>,
   body: string | undefined,
   config: Config
 ): Promise<{
@@ -105,54 +197,9 @@ async function performFetch(
   isError?: boolean;
 }> {
   const retrievedAt = new Date().toISOString();
+  const upperMethod = method.toUpperCase();
 
   try {
-    // Validate URL
-    if (!config.allowedUrlRegex.test(url)) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `URL not allowed: ${url} does not match allowed regex ${config.allowedUrlRegex.source}`,
-          },
-        ],
-        structuredContent: {
-          url,
-          retrievedAt,
-          statusCode: -1,
-        },
-        isError: true,
-      };
-    }
-
-    // Validate method
-    const upperMethod = method.toUpperCase();
-    if (!config.allowedMethods.has(upperMethod)) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Method not allowed: ${method}. Allowed methods: ${Array.from(config.allowedMethods).join(", ")}`,
-          },
-        ],
-        structuredContent: {
-          url,
-          retrievedAt,
-          statusCode: -1,
-        },
-        isError: true,
-      };
-    }
-
-    // Filter headers (case-insensitive)
-    const filteredHeaders: Record<string, string> = {};
-    if (headers) {
-      for (const [key, value] of Object.entries(headers)) {
-        if (config.allowedHeaderNames.has(key.toLowerCase())) {
-          filteredHeaders[key] = value;
-        }
-      }
-    }
 
     // Set up timeout
     const controller = new AbortController();
@@ -162,7 +209,7 @@ async function performFetch(
       // Perform fetch
       const response = await fetch(url, {
         method: upperMethod,
-        headers: filteredHeaders,
+        headers: headers,
         body: body,
         signal: controller.signal,
       });
@@ -305,9 +352,18 @@ server.tool(
     headers: z.record(z.string()).optional().describe("HTTP headers to include"),
     body: z.string().optional().describe("Request body for POST/PUT requests"),
   },
-  async ({ url, method = "GET", headers, body }) => {
-    // Perform fetch
-    return await performFetch(url, method, headers, body, config);
+  async ({ url, method = "GET", headers, body }, extra) => {
+    // Validate URL and HTTP method
+    const validationError = validateRequest(url, method, config);
+    if (validationError) {
+      return validationError;
+    }
+
+    // Merge and filter headers from both tool params and MCP request
+    const filteredHeaders = mergeAndFilterHeaders(headers, extra.requestInfo?.headers, config);
+
+    // Perform fetch with filtered headers
+    return await performFetch(url, method, filteredHeaders, body, config);
   }
 );
 
