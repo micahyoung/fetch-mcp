@@ -6,6 +6,7 @@ import { IsomorphicHeaders } from "@modelcontextprotocol/sdk/types.js";
 import express, { Request, Response } from "express";
 import { z } from "zod";
 import { randomBytes } from "crypto";
+import { parseArgs as utilParseArgs } from "node:util";
 
 // Configuration interface
 interface Config {
@@ -21,40 +22,48 @@ interface Config {
 
 // Parse CLI arguments
 function parseArgs(): Config {
-  const args = process.argv.slice(2);
-  const config: Config = {
-    secret: randomBytes(32).toString("hex"),
-    allowedUrlRegex: /^http:\/\/localhost(:[0-9]+)?(\/.*)?$/,
-    allowedMethods: new Set(["GET"]),
-    allowedToolHeaderNames: new Set(["content-type", "accept"]),
-    allowedPassthroughHeaderNames: new Set([]),
-    fetchTimeout: 30,
-    fetchMaxResponseSize: 100,
-    port: 3000,
-  };
+  const { values } = utilParseArgs({
+    options: {
+      'secret': { type: 'string' },
+      'allowed-url-regex': { type: 'string' },
+      'allowed-methods': { type: 'string' },
+      'allowed-tool-header-names': { type: 'string' },
+      'allowed-passthrough-header-names': { type: 'string' },
+      'fetch-timeout': { type: 'string' },
+      'fetch-max-response-size': { type: 'string' },
+      'port': { type: 'string' }
+    },
+    strict: false,
+    allowPositionals: false
+  });
 
-  for (const arg of args) {
-    if (arg.startsWith("--secret=")) {
-      config.secret = arg.slice(9);
-    } else if (arg.startsWith("--allowed-url-regex=")) {
-      config.allowedUrlRegex = new RegExp(arg.slice(20));
-    } else if (arg.startsWith("--allowed-methods=")) {
-      const methods = arg.slice(18).split(",").map(m => m.trim().toUpperCase());
-      config.allowedMethods = new Set(methods);
-    } else if (arg.startsWith("--allowed-tool-header-names=")) {
-      const headers = arg.slice(29).split(",").map(h => h.trim().toLowerCase());
-      config.allowedToolHeaderNames = new Set(headers);
-    } else if (arg.startsWith("--allowed-passthrough-header-names=")) {
-      const headers = arg.slice(27).split(",").map(h => h.trim().toLowerCase());
-      config.allowedPassthroughHeaderNames = new Set(headers);
-    } else if (arg.startsWith("--fetch-timeout=")) {
-      config.fetchTimeout = parseInt(arg.slice(16), 10);
-    } else if (arg.startsWith("--fetch-max-response-size=")) {
-      config.fetchMaxResponseSize = parseInt(arg.slice(26), 10);
-    } else if (arg.startsWith("--port=")) {
-      config.port = parseInt(arg.slice(7), 10);
-    }
-  }
+  const secret = typeof values['secret'] === 'string' ? values['secret'] : undefined;
+  const allowedUrlRegexStr = typeof values['allowed-url-regex'] === 'string' ? values['allowed-url-regex'] : undefined;
+  const allowedMethodsStr = typeof values['allowed-methods'] === 'string' ? values['allowed-methods'] : undefined;
+  const allowedToolHeaderNamesStr = typeof values['allowed-tool-header-names'] === 'string' ? values['allowed-tool-header-names'] : undefined;
+  const allowedPassthroughHeaderNamesStr = typeof values['allowed-passthrough-header-names'] === 'string' ? values['allowed-passthrough-header-names'] : undefined;
+  const fetchTimeoutStr = typeof values['fetch-timeout'] === 'string' ? values['fetch-timeout'] : undefined;
+  const fetchMaxResponseSizeStr = typeof values['fetch-max-response-size'] === 'string' ? values['fetch-max-response-size'] : undefined;
+  const portStr = typeof values['port'] === 'string' ? values['port'] : undefined;
+
+  const config: Config = {
+    secret: secret || randomBytes(32).toString("hex"),
+    allowedUrlRegex: allowedUrlRegexStr
+      ? new RegExp(allowedUrlRegexStr)
+      : /^http:\/\/localhost(:[0-9]+)?(\/.*)?$/,
+    allowedMethods: allowedMethodsStr
+      ? new Set(allowedMethodsStr.split(",").map((m: string) => m.trim().toUpperCase()))
+      : new Set(["GET"]),
+    allowedToolHeaderNames: allowedToolHeaderNamesStr
+      ? new Set(allowedToolHeaderNamesStr.split(",").map((h: string) => h.trim().toLowerCase()))
+      : new Set(["content-type", "accept"]),
+    allowedPassthroughHeaderNames: allowedPassthroughHeaderNamesStr
+      ? new Set(allowedPassthroughHeaderNamesStr.split(",").map((h: string) => h.trim().toLowerCase()))
+      : new Set([]),
+    fetchTimeout: fetchTimeoutStr ? parseInt(fetchTimeoutStr, 10) : 30,
+    fetchMaxResponseSize: fetchMaxResponseSizeStr ? parseInt(fetchMaxResponseSizeStr, 10) : 100,
+    port: portStr ? parseInt(portStr, 10) : 3000,
+  };
 
   return config;
 }
