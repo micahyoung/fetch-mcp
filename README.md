@@ -10,7 +10,8 @@ A Model Context Protocol (MCP) server that provides a `web_fetch` tool for makin
   - Shared secret for MCP client-to-server authentication
   - allowlist for URLs
   - allowlist for HTTP Methods
-  - allowlist for Headers
+  - allowlist for Headers, passed via tool's `headers` parameter
+  - allowlist for Headers, passed through from the MCP request's headers
   - Request timeout
   - Response size limits
 
@@ -35,7 +36,8 @@ node build/index.js \
   --port=3000 \
   --allowed-url-regex="^https?://api\.example\.com/.*" \
   --allowed-methods=GET,POST \
-  --allowed-header-names=Authorization,Content-Type \
+  --allowed-tool-header-names=User-agent,Content-Type \
+  --allowed-passthrough-header-names=Authorization \
   --fetch-timeout=30 \
   --fetch-max-response-size=100
 ```
@@ -48,7 +50,8 @@ node build/index.js \
 | `--port=<number>` | `3000` | HTTP server port |
 | `--allowed-url-regex=<regex>` | `^http://localhost(:[0-9]+)?(/.*)?$` | Regex pattern for allowed URLs |
 | `--allowed-methods=<csv>` | `GET` | Comma-separated list of allowed HTTP methods |
-| `--allowed-header-names=<csv>` | `Authorization,Content-Type,Accept,User-Agent` | Comma-separated list of allowed headers (case-insensitive) |
+| `--allowed-tool-header-names=<csv>` | `Content-Type,Accept` | Comma-separated list of headers allowed from the tool's `headers` parameter (case-insensitive) |
+| `--allowed-passthrough-header-names=<csv>` | None | Comma-separated list of headers allowed to pass-through from the MCP SSE request (case-insensitive) |
 | `--fetch-timeout=<seconds>` | `30` | Request timeout in seconds |
 | `--fetch-max-response-size=<KB>` | `100` | Maximum response size in kilobytes |
 
