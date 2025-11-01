@@ -216,11 +216,14 @@ export async function performFetch(
     const timeoutId = setTimeout(() => controller.abort(), config.fetchTimeout * 1000);
 
     try {
+      // Normalize body - set to undefined if empty string
+      const normalizedBody = body === '' ? undefined : body;
+
       // Perform fetch
       const response = await fetch(url, {
         method: upperMethod,
         headers: headers,
-        body: body,
+        body: normalizedBody,
         signal: controller.signal,
       });
 
